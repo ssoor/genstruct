@@ -6,14 +6,18 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/rs/cors"
 )
 
+// 通过执行 go generate ./... 将静态资源带包到程序里
+//go:generate gex go-bindata -fs -o assets_gen.go -prefix ../web/dist ../web/dist
+
 func main() {
-	port := flag.String("addr", ":8989", "addr ip:port")
+	addr := flag.String("addr", ":8989", "addr ip:port")
 	flag.Parse()
 
 	c := cors.AllowAll()
@@ -43,11 +47,16 @@ func main() {
 		w.Write([]byte(st))
 	})
 
-	http.Handle("/", http.FileServer(http.Dir("./dist")))
+	http.Handle("/", http.FileServer(AssetFile()))
 	http.Handle("/genapi/struct/gen", c.Handler(handler))
 
-	fmt.Printf("server: http://%v\n", *port)
-	err := http.ListenAndServe(*port, nil)
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatal("Listen", err)
+	}
+	fmt.Printf("server: http://%v\n", ln.Addr())
+
+	err = http.Serve(ln, nil)
 
 	if err != nil {
 		log.Fatal("ListenAndServe", err)

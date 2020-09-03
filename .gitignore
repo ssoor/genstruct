@@ -12,3 +12,6 @@
 *.out
 
 genstruct
+bin/
+api/api
+api/assets_gen.go
