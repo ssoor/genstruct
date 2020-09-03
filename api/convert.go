@@ -1,0 +1,401 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"go/format"
+	"html/template"
+	"io"
+	"os"
+	"regexp"
+	"strings"
+)
+
+const (
+	start = `// {TYPE} ...
+type {TYPE} struct {
+`
+	comment = "	// {COMMENT}\n"
+	tab     = `	{FIELD} {FIELD_TYPE} ` + "`{TAGS}`\n"
+	end     = "}\n"
+	unknown = "unknown"
+)
+
+const tmplHeader = `package {{ .PackageName }}
+{{ if .ExistTime }}
+import (
+	"time"
+){{end}}`
+
+const tmplContent = `{{ if ne .StructComment "" }}
+// {{ .StructName }} {{.StructComment}}{{ end }}
+type {{ .StructName }} struct {
+{{ range $i,$v := .Columns }}{{ if ne .Comment "" }}// {{ .StructField }} {{.Comment}}` + "\n" + `{{ end }}{{ .StructField }}    {{ if .NotNull }}*{{ end }}{{ .Type }}    ` + "\u0060" + `{{ if eq $.Type "gorm" }}{{ if .PrimaryKey }}gorm:"primary_key" {{ end }}{{ end }}{{ range $j,$tag := $.OtherTags }}{{ $tag }}:"{{ $v.Field }}"{{ if ne $j $.Len }} {{ end }}{{ end }}` + "\u0060" + `{{ if ne $i $.Len }}` + "\n" + `{{ end }}{{ end }}
+}
+
+func ({{ .ShortName }} {{ .StructName }}) TableName() string {
+    return "{{ .TableName }}"
+}
+{{ if eq $.Type "gosql" }}
+func ({{ .ShortName }} {{ .StructName }}) PK() string {
+    return "{{ .PrimaryKey }}"
+}{{ end }}
+`
+
+type Attr struct {
+	NotNull     bool
+	PrimaryKey  bool
+	StructField string
+	Field       string
+	Type        string
+	Comment     string
+}
+
+type TableInfo struct {
+	Type          string
+	Columns       []*Attr
+	Len           int
+	OtherTags     []string
+	TagLen        int
+	PackageName   string
+	TableName     string
+	ShortName     string
+	StructName    string
+	StructComment string
+	PrimaryKey    string
+	ExistTime     bool
+}
+
+func convert2(r io.Reader, tags []string) ([]byte, error) {
+	packageName := "main"
+
+	info := &TableInfo{
+		Type:          "gorm",
+		OtherTags:     tags,
+		TagLen:        len(tags),
+		Columns:       make([]*Attr, 0),
+		PackageName:   packageName,
+		StructComment: "...",
+	}
+
+	var buf bytes.Buffer
+
+	input := bufio.NewScanner(r)
+	sql := false
+
+	var existTime = false
+	primaryKeyMap := make(map[string]bool)
+	for input.Scan() {
+		line := strings.Trim(input.Text(), " ")
+		field0 := regexp.MustCompile("`(.*)`").FindString(line)
+
+		if strings.Contains(strings.ToLower(line), "create table") {
+			sql = true
+			info.TableName = strings.Trim(field0, "`")
+			info.StructName = getStructName(info.TableName)
+			if len(info.StructName) > 0 {
+				info.ShortName = strings.ToLower(info.StructName[0:1])
+			}
+			continue
+		}
+
+		fields := strings.Fields(strings.Replace(line, field0, strings.Replace(field0, " ", "_", -1), -1))
+		if len(fields) <= 1 || strings.ToLower(fields[0]) == "key" {
+			sql = false
+			continue
+		}
+
+		if strings.ToLower(fields[0]) == "primary" {
+			primaryKeyMap[strings.Trim(field0, "`")] = true
+			sql = false
+			continue
+		}
+
+		if fields[0] == ")" {
+			for i := range fields {
+				if strings.ToLower(fields[i]) == "comment" {
+					info.StructComment = strings.TrimLeft(strings.Join(fields[i+1:], " "), "= '")
+
+					if i := strings.LastIndex(info.StructComment, "'"); i != -1 {
+						info.StructComment = info.StructComment[:i]
+					}
+				}
+			}
+
+			info.ExistTime = existTime
+
+			for _, col := range info.Columns {
+				if !primaryKeyMap[col.Field] {
+					continue
+				}
+
+				col.PrimaryKey = true
+			}
+
+			info.Len = len(info.Columns) - 1
+
+			tmpl, err := template.New("struct").Parse(tmplContent)
+			if err != nil {
+				return nil, err
+			}
+
+			err = tmpl.Execute(&buf, info)
+			if err != nil {
+				return nil, err
+			}
+
+			info.Columns = info.Columns[:]
+
+			sql = false
+			continue
+		}
+
+		if !sql {
+			continue
+		}
+
+		nameRaw := strings.Trim(fields[0], "`")
+		name := getStructName(nameRaw)
+		nameTyp := getType(fields)
+
+		notNull := false
+		nameComment := ""
+		for i := range fields {
+			if i != 0 && strings.ToLower(fields[i-1]) == "not" && strings.ToLower(fields[i]) == "null" {
+				notNull = true
+			}
+
+			if strings.ToLower(fields[i]) == "comment" {
+				//s += strings.Replace(c, "{COMMENT}", name+" "+strings.Trim(fields[i+1], "',"), 1)
+				nameComment = strings.TrimLeft(strings.TrimRight(strings.Join(fields[i+1:], " "), "',"), "'")
+			}
+		}
+
+		if nameTyp == "time.Time" {
+			existTime = true
+		} else {
+			notNull = false
+		}
+
+		attr := &Attr{
+			StructField: name,
+			Field:       nameRaw,
+			Type:        nameTyp,
+			Comment:     nameComment,
+			NotNull:     notNull,
+			PrimaryKey:  false,
+		}
+
+		info.Columns = append(info.Columns, attr)
+		// if m["Key"] == "PRI" {
+		// 	info.PrimaryKey = attr.Field
+		// }
+	}
+
+	otf := bytes.NewBuffer(nil)
+
+	tmpl, err := template.New("struct").Parse(tmplHeader)
+	if err != nil {
+		return nil, err
+	}
+
+	err = tmpl.Execute(otf, info)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = buf.WriteTo(otf)
+	if err != nil {
+		return nil, err
+	}
+
+	// return otf.Bytes(), nil
+	return format.Source(otf.Bytes())
+}
+
+var s = `// Package {PACKAGE} Auto generated by genstruct.
+// check https://github.com/ssoor/genstruct for more information.
+package {PACKAGE}
+`
+
+func Convert(infile string, tags []string) ([]byte, error) {
+	// read file
+	f, err := os.Open(infile)
+	defer f.Close()
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+
+	return convert(f, tags)
+}
+
+func ConvertSQL(sql string, tags []string) ([]byte, error) {
+	return convert2(bytes.NewBufferString(sql), tags)
+}
+
+func convert(r io.Reader, tags []string) ([]byte, error) {
+	packageName := "main"
+
+	otf := bytes.NewBuffer(nil)
+
+	s = strings.Replace(s, "{PACKAGE}", packageName, -1)
+	otf.Write([]byte(s))
+
+	input := bufio.NewScanner(r)
+	sql := false
+
+	for input.Scan() {
+		line := strings.Trim(input.Text(), " ")
+		field0 := regexp.MustCompile("`(.*)`").FindString(line)
+
+		if strings.Contains(strings.ToLower(line), "create table") {
+			sql = true
+			tableName := getStructName(strings.Trim(field0, "`"))
+			//s += strings.Replace(start, "{TYPE}", tableName, 1)
+			otf.Write([]byte(strings.Replace(start, "{TYPE}", tableName, -1)))
+			continue
+		}
+
+		fields := strings.Fields(strings.Replace(line, field0, strings.Replace(field0, " ", "_", -1), -1))
+		if len(fields) <= 1 || strings.ToLower(fields[0]) == "key" || strings.ToLower(fields[0]) == "primary" {
+			sql = false
+			continue
+		}
+
+		if fields[0] == ")" {
+			//s += end
+			otf.Write([]byte(end))
+			sql = false
+			continue
+		}
+
+		if !sql {
+			continue
+		}
+
+		t := ""
+		name := getStructName(strings.Trim(fields[0], "`"))
+		for i := range fields {
+			c := comment
+			if strings.ToLower(fields[i]) == "comment" {
+				//s += strings.Replace(c, "{COMMENT}", name+" "+strings.Trim(fields[i+1], "',"), 1)
+				otf.Write([]byte(strings.Replace(c, "{COMMENT}", name+" "+strings.TrimLeft(strings.TrimRight(strings.Join(fields[i+1:], " "), "',"), "'"), 1)))
+			}
+		}
+
+		tagsOut := bytes.NewBuffer(nil)
+		tagName := strings.Trim(fields[0], "`")
+		for _, tag := range tags {
+			tagsOut.WriteString(fmt.Sprintf("%s:\"%s\" ", tag, tagName))
+		}
+
+		t = strings.Replace(tab, "{FIELD}", name, -1)
+		t = strings.Replace(t, "{TAGS}", tagsOut.String(), -1)
+		t = strings.Replace(t, "{FIELD_TYPE}", getType(fields), -1)
+
+		otf.Write([]byte(t))
+		//s += t
+	}
+
+	return otf.Bytes(), nil
+}
+
+var upperWords = map[string]bool{
+	"ACL":   true,
+	"API":   true,
+	"ASCII": true,
+	"CPU":   true,
+	"CSS":   true,
+	"DNS":   true,
+	"EOF":   true,
+	"GUID":  true,
+	"HTML":  true,
+	"HTTP":  true,
+	"HTTPS": true,
+	"ID":    true,
+	"IP":    true,
+	"JSON":  true,
+	"LHS":   true,
+	"QPS":   true,
+	"RAM":   true,
+	"RHS":   true,
+	"RPC":   true,
+	"SLA":   true,
+	"SMTP":  true,
+	"SQL":   true,
+	"SSH":   true,
+	"TCP":   true,
+	"TLS":   true,
+	"TTL":   true,
+	"UDP":   true,
+	"UI":    true,
+	"UID":   true,
+	"UUID":  true,
+	"URI":   true,
+	"URL":   true,
+	"UTF8":  true,
+	"VM":    true,
+	"XML":   true,
+	"XMPP":  true,
+	"XSRF":  true,
+	"XSS":   true,
+}
+
+func getStructName(field string) string {
+	s := strings.Split(strings.Replace(field, "_", " ", -1), " ")
+	for i := range s {
+		if _, ok := upperWords[strings.ToUpper(s[i])]; ok {
+			s[i] = strings.ToUpper(s[i])
+		} else {
+			s[i] = strings.Title(s[i])
+		}
+	}
+
+	return strings.Join(s, "")
+}
+
+func getType(fields []string) string {
+	if len(fields) < 2 {
+		return unknown
+	}
+
+	field1 := strings.ToLower(fields[1])
+	unsign := ""
+	if len(fields) >= 3 {
+		if strings.Contains(strings.ToLower(fields[2]), "unsign") {
+			unsign = "u"
+		}
+	}
+
+	name := regexp.MustCompile(`[a-z]{1,}`).FindString(field1)
+	switch name {
+	case "tinyint":
+		return unsign + "int8"
+
+	case "smallint":
+		return unsign + "int16"
+
+	case "int", "mediumint":
+		return unsign + "int32"
+
+	case "bigint":
+		return unsign + "int64"
+
+	case "float", "decimal":
+		return "float32"
+
+	case "double":
+		return "float64"
+
+	case "date", "char", "varchar", "blob", "text", "tinyblob", "tinytext", "mediumblob", "mediumtext", "longblob", "longtext", "enum":
+		return "string"
+
+	case "timestamp", "datetime":
+		return "time.Time"
+
+	}
+
+	return unknown
+}
