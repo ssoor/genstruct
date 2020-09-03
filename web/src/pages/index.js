@@ -9,7 +9,7 @@ const { Option } = Select;
 export default () => {
   const [schema, setSchema] = useState('');
   const [struct, setStruct] = useState('');
-  const [tags, setTags] = useState(["db", "json"]);
+  const [tags, setTags] = useState(["json"]);
 
   const onChange = ({target: {value}}) => {
     setSchema(value);
@@ -32,14 +32,15 @@ export default () => {
   return (
     <div style={{margin: '20px'}}>
       <Card
-        title="MySQL Structure to Golang Struct"
+        title="MySQL 建表语句转换成 Golang 结构体"
         extra={
           <Button type="primary" onClick={onConvert}>
-            Convert
+            开始转换
           </Button>
         }
       >
         <Row style={{marginBottom:'24px'}}>
+        <div style={{width:'100px',fontSize:'15px'}}>Tag：</div>
           <Select mode="tags" style={{width: '100%'}} defaultValue={tags} placeholder="Tags" onChange={handleTags}>
             {tags}
           </Select>
@@ -48,7 +49,7 @@ export default () => {
           <Col span={12}>
             <TextArea
               onChange={onChange}
-              placeholder="Input MySQL Create Table Syntax"
+              placeholder="输入 MySQL 建表语句"
               autoSize={{minRows: 20, maxRows: 20}}
             />
           </Col>
