@@ -5,10 +5,9 @@ RUN apk update && \
 
 WORKDIR /app
 
-COPY ./app ./
-COPY .env ./
+COPY ./api ./
 
 ENV TZ=Asia/Shanghai
 EXPOSE 80
 
-ENTRYPOINT ["./app","--addr=:80"]
+ENTRYPOINT ["./api","--addr=:80"]
