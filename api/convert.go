@@ -31,7 +31,7 @@ import (
 const tmplContent = `{{ if ne .StructComment "" }}
 // {{ .StructName }} {{.StructComment}}{{ end }}
 type {{ .StructName }} struct {
-{{ range $i,$v := .Columns }}{{ if ne .Comment "" }}// {{ .StructField }} {{.Comment}}` + "\n" + `{{ end }}{{ .StructField }}    {{ if .NotNull }}*{{ end }}{{ .Type }}    ` + "\u0060" + `{{ if eq $.Type "gorm" }}gorm:"column:{{ $v.Field }}{{ if .PrimaryKey }};primary_key{{ end }}" {{ end }}{{ range $j,$tag := $.OtherTags }}{{ $tag }}:"{{ $v.Field }}"{{ if ne $j $.Len }} {{ end }}{{ end }}` + "\u0060" + `{{ if ne $i $.Len }}` + "\n" + `{{ end }}{{ end }}
+{{ range $i,$v := .Columns }}{{ if ne .Comment "" }}// {{ .StructField }} {{.Comment}}` + "\n" + `{{ end }}{{ .StructField }}    {{ if .AllowNull }}*{{ end }}{{ .Type }}    ` + "\u0060" + `{{ if eq $.Type "gorm" }}gorm:"column:{{ $v.Field }}{{ if .PrimaryKey }};primary_key{{ end }}" {{ end }}{{ range $j,$tag := $.OtherTags }}{{ $tag }}:"{{ $v.Field }}"{{ if ne $j $.Len }} {{ end }}{{ end }}` + "\u0060" + `{{ if ne $i $.Len }}` + "\n" + `{{ end }}{{ end }}
 }
 
 func ({{ .ShortName }} {{ .StructName }}) TableName() string {
@@ -44,7 +44,7 @@ func ({{ .ShortName }} {{ .StructName }}) PK() string {
 `
 
 type Attr struct {
-	NotNull     bool
+	AllowNull   bool
 	PrimaryKey  bool
 	StructField string
 	Field       string
@@ -159,11 +159,11 @@ func convert2(r io.Reader, tags []string) ([]byte, error) {
 		name := getStructName(nameRaw)
 		nameTyp := getType(fields)
 
-		notNull := false
+		allowNull := true
 		nameComment := ""
 		for i := range fields {
 			if i != 0 && strings.ToLower(fields[i-1]) == "not" && strings.ToLower(fields[i]) == "null" {
-				notNull = true
+				allowNull = false
 			}
 
 			if strings.ToLower(fields[i]) == "comment" {
@@ -175,7 +175,7 @@ func convert2(r io.Reader, tags []string) ([]byte, error) {
 		if nameTyp == "time.Time" {
 			existTime = true
 		} else {
-			notNull = false
+			allowNull = false
 		}
 
 		attr := &Attr{
@@ -183,7 +183,7 @@ func convert2(r io.Reader, tags []string) ([]byte, error) {
 			Field:       nameRaw,
 			Type:        nameTyp,
 			Comment:     nameComment,
-			NotNull:     notNull,
+			AllowNull:   allowNull,
 			PrimaryKey:  false,
 		}
 
